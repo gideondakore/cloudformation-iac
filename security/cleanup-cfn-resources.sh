@@ -12,6 +12,13 @@ EC2_GROUP="${STACK_PREFIX}-EC2-Users"
 S3_GROUP="${STACK_PREFIX}-S3-Users"
 EC2_USERS=("ec2-user1" "ec2-user2")
 S3_USERS=("s3-user")
+AWS_REGION="eu-west-1"
+
+# Set region for all AWS CLI calls
+export AWS_DEFAULT_REGION=$AWS_REGION
+
+# Disable AWS CLI pager to prevent output opening in less/more
+export AWS_PAGER=""
 
 echo "============================================================"
 echo " Starting Cleanup of Orphaned CloudFormation Resources"
@@ -98,52 +105,82 @@ delete_managed_policies() {
   echo ""
   echo ">>> Processing managed policies with prefix: $STACK_PREFIX"
 
+  # Temporarily disable exit-on-error for this function
+  set +e
+
   POLICY_ARNS=$(aws iam list-policies --scope Local \
+    --region "$AWS_REGION" \
     --query "Policies[?contains(PolicyName, '${STACK_PREFIX}')].Arn" \
-    --output text)
+    --output text 2>&1)
+
+  echo "    DEBUG: Raw policy list output: $POLICY_ARNS"
+
+  # Filter out None/empty/error responses
+  POLICY_ARNS=$(echo "$POLICY_ARNS" | grep -v "^None$" | grep -v "^$" | grep "arn:aws:iam" || true)
 
   if [ -z "$POLICY_ARNS" ]; then
     echo "    [SKIP] No orphaned managed policies found."
+    set -e
     return
   fi
 
+  echo "    Found policies to delete:"
+  echo "$POLICY_ARNS"
+
   for POLICY_ARN in $POLICY_ARNS; do
+    echo ""
     echo "    Processing policy: $POLICY_ARN"
 
     # Detach from any groups
-    GROUPS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query "PolicyGroups[].GroupName" --output text)
+    GROUPS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" \
+      --region "$AWS_REGION" \
+      --query "PolicyGroups[].GroupName" --output text 2>/dev/null || true)
     for GROUP in $GROUPS; do
+      [ "$GROUP" = "None" ] && continue
       echo "    Detaching from group: $GROUP"
-      aws iam detach-group-policy --group-name "$GROUP" --policy-arn "$POLICY_ARN"
+      aws iam detach-group-policy --group-name "$GROUP" --policy-arn "$POLICY_ARN" --region "$AWS_REGION" || true
     done
 
     # Detach from any users
-    USERS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query "PolicyUsers[].UserName" --output text)
+    USERS=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" \
+      --region "$AWS_REGION" \
+      --query "PolicyUsers[].UserName" --output text 2>/dev/null || true)
     for USER in $USERS; do
+      [ "$USER" = "None" ] && continue
       echo "    Detaching from user: $USER"
-      aws iam detach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN"
+      aws iam detach-user-policy --user-name "$USER" --policy-arn "$POLICY_ARN" --region "$AWS_REGION" || true
     done
 
     # Detach from any roles
-    ROLES=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" --query "PolicyRoles[].RoleName" --output text)
+    ROLES=$(aws iam list-entities-for-policy --policy-arn "$POLICY_ARN" \
+      --region "$AWS_REGION" \
+      --query "PolicyRoles[].RoleName" --output text 2>/dev/null || true)
     for ROLE in $ROLES; do
+      [ "$ROLE" = "None" ] && continue
       echo "    Detaching from role: $ROLE"
-      aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$POLICY_ARN"
+      aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$POLICY_ARN" --region "$AWS_REGION" || true
     done
 
     # Delete non-default policy versions first
     VERSIONS=$(aws iam list-policy-versions --policy-arn "$POLICY_ARN" \
-      --query "Versions[?IsDefaultVersion==\`false\`].VersionId" --output text)
+      --region "$AWS_REGION" \
+      --query "Versions[?IsDefaultVersion==\`false\`].VersionId" --output text 2>/dev/null || true)
     for VERSION in $VERSIONS; do
+      [ "$VERSION" = "None" ] && continue
       echo "    Deleting policy version: $VERSION"
-      aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION"
+      aws iam delete-policy-version --policy-arn "$POLICY_ARN" --version-id "$VERSION" --region "$AWS_REGION" || true
     done
 
     # Delete the policy
     echo "    Deleting policy: $POLICY_ARN"
-    aws iam delete-policy --policy-arn "$POLICY_ARN"
-    echo "    [DONE] Policy deleted."
+    if aws iam delete-policy --policy-arn "$POLICY_ARN" --region "$AWS_REGION"; then
+      echo "    [DONE] Policy deleted."
+    else
+      echo "    [ERROR] Failed to delete policy: $POLICY_ARN"
+    fi
   done
+
+  set -e
 }
 
 delete_secrets() {
@@ -151,8 +188,12 @@ delete_secrets() {
   echo ">>> Processing Secrets Manager secrets with prefix: $STACK_PREFIX"
 
   SECRET_ARNS=$(aws secretsmanager list-secrets \
+    --region "$AWS_REGION" \
     --query "SecretList[?contains(Name, '${STACK_PREFIX}')].ARN" \
     --output text)
+
+  # Filter out None/empty responses
+  SECRET_ARNS=$(echo "$SECRET_ARNS" | grep -v "^None$" | grep -v "^$" || true)
 
   if [ -z "$SECRET_ARNS" ]; then
     echo "    [SKIP] No orphaned secrets found."
@@ -162,6 +203,7 @@ delete_secrets() {
   for SECRET_ARN in $SECRET_ARNS; do
     echo "    Deleting secret: $SECRET_ARN"
     aws secretsmanager delete-secret \
+      --region "$AWS_REGION" \
       --secret-id "$SECRET_ARN" \
       --force-delete-without-recovery
     echo "    [DONE] Secret deleted."
@@ -206,8 +248,3 @@ echo "------------------------------------------------------------"
 echo " Step 5: Deleting Secrets"
 echo "------------------------------------------------------------"
 delete_secrets
-
-echo ""
-echo "============================================================"
-echo " Cleanup Complete! You can now retry the CloudFormation deployment."
-echo "============================================================"
