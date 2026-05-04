@@ -1,0 +1,3 @@
+template-file-path: networking/vpc_deployment.yml
+parameters: {}
+tags: {}
