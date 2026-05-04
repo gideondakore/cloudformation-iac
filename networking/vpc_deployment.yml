@@ -265,7 +265,7 @@ Resources:
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Web tier — HTTP from internet, ICMP from within VPC
+      GroupDescription: Web tier - HTTP from internet, ICMP from within VPC
       VpcId: !Ref Vpc
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -285,7 +285,7 @@ Resources:
   AppSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: App tier — ICMP from web tier only, no inbound SSH/HTTP
+      GroupDescription: App tier - ICMP from web tier only, no inbound SSH/HTTP
       VpcId: !Ref Vpc
       Tags:
         - Key: Name
