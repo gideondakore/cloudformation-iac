@@ -15,27 +15,27 @@ Parameters:
 
   VpcCidr:
     Type: String
-    Default: 10.0.0.0/16
+    Default: 192.168.0.0/16
     Description: CIDR block for the VPC.
 
   PublicSubnet1Cidr:
     Type: String
-    Default: 10.0.1.0/24
+    Default: 192.168.1.0/24
     Description: CIDR block for the public subnet in AZ 1.
 
   PublicSubnet2Cidr:
     Type: String
-    Default: 10.0.2.0/24
+    Default: 192.168.2.0/24
     Description: CIDR block for the public subnet in AZ 2.
 
   PrivateSubnet1Cidr:
     Type: String
-    Default: 10.0.11.0/24
+    Default: 192.168.11.0/24
     Description: CIDR block for the private subnet in AZ 1.
 
   PrivateSubnet2Cidr:
     Type: String
-    Default: 10.0.12.0/24
+    Default: 192.168.12.0/24
     Description: CIDR block for the private subnet in AZ 2.
 
   InstanceType:
