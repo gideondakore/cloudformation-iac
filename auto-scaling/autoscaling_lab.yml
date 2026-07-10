@@ -35,6 +35,7 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.micro
+    AllowedValues: [t2.micro, t3.micro, t3.small]
     Description: Instance type for the web servers (small types keep cost low)
 
   LatestAmiId:
@@ -215,6 +216,7 @@ Resources:
   # ------------------------------------------------------ Load balancer ---
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: InternetGatewayAttachment
     Properties:
       Name: !Sub ${ProjectName}-alb
       Scheme: internet-facing
