@@ -143,8 +143,6 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # Regional NAT Gateway - VPC-wide, auto-expands across AZs, no subnet
-  # required. AWS automatically manages EIPs as it expands (automatic mode).
   NatGateway:
     Type: AWS::EC2::NatGateway
     DependsOn: InternetGatewayAttachment
@@ -244,8 +242,6 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
-      # Round-robin is the ALB default; disable stickiness so requests
-      # rotate across instances during the demo.
       TargetGroupAttributes:
         - Key: load_balancing.algorithm.type
           Value: round_robin
