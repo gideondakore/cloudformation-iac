@@ -35,7 +35,6 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.micro
-    AllowedValues: [t2.micro, t3.micro, t3.small]
     Description: Instance type for the web servers (small types keep cost low)
 
   LatestAmiId:
@@ -145,21 +144,14 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # Single NAT Gateway serves both private subnets (regional/cost-optimized)
-  NatEip:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-nat-eip
-
+  # Regional NAT Gateway - VPC-wide, auto-expands across AZs, no subnet
+  # required. AWS automatically manages EIPs as it expands (automatic mode).
   NatGateway:
     Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
     Properties:
-      AllocationId: !GetAtt NatEip.AllocationId
-      SubnetId: !Ref PublicSubnet1
+      AvailabilityMode: regional
+      VpcId: !Ref Vpc
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-nat
@@ -378,7 +370,7 @@ Resources:
       TargetGroupARNs:
         - !Ref WebTargetGroup
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 120
+      HealthCheckGracePeriod: 300
       MetricsCollection:
         - Granularity: 1Minute
       Tags:
