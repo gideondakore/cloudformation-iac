@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Elastic Beanstalk lab - Node.js web application. Provisions the S3 bucket
+  for source bundles, a DynamoDB table (external service integration), the
+  Elastic Beanstalk application and environment with managed environment
+  variables, and an OIDC-based IAM role for GitHub Actions deployments.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: eb-lab
+    Description: Prefix used for naming and tagging resources
+
+  SolutionStackName:
+    Type: String
+    Default: 64bit Amazon Linux 2023 v6.6.1 running Node.js 22
+    Description: >
+      Elastic Beanstalk solution stack. List current values with:
+      aws elasticbeanstalk list-available-solution-stacks
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Instance type for the Beanstalk-managed EC2 instances
+
+  GitHubRepository:
+    Type: String
+    Default: gideondakore/cloudformation-iac
+    Description: GitHub org/repo allowed to assume the deployment role (OIDC)
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to deploy
+
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to false if the account already has the GitHub Actions OIDC
+      provider (token.actions.githubusercontent.com)
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  # ------------------------------------------------- Source bundle bucket ---
+  SourceBundleBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-bundles-${AWS::AccountId}-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-bundles
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  # ------------------------------------------- External service (DynamoDB) ---
+  VisitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-visits
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+
+  # ----------------------------------------------------------- IAM roles ---
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-instance-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+      Policies:
+        - PolicyName: dynamodb-visits-table
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt VisitsTable.Arn
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-service-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: elasticbeanstalk
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkManagedUpdatesCustomerRolePolicy
+
+  # ------------------------------------------ GitHub Actions OIDC (CI/CD) ---
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-github-deploy-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:ref:refs/heads/${GitHubBranch}
+      Policies:
+        - PolicyName: eb-deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: UploadBundle
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub ${SourceBundleBucket.Arn}/*
+              - Sid: ManageAppVersions
+                Effect: Allow
+                Action:
+                  - elasticbeanstalk:CreateApplicationVersion
+                  - elasticbeanstalk:UpdateEnvironment
+                  - elasticbeanstalk:DescribeApplicationVersions
+                  - elasticbeanstalk:DescribeEnvironments
+                  - elasticbeanstalk:DescribeEvents
+                Resource: "*"
+              - Sid: BeanstalkInternals
+                Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:SuspendProcesses
+                  - autoscaling:ResumeProcesses
+                  - autoscaling:UpdateAutoScalingGroup
+                  - cloudformation:GetTemplate
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:UpdateStack
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:RegisterTargets
+                  - ec2:DescribeInstances
+                  - ec2:DescribeImages
+                Resource: "*"
+
+  # ------------------------------------------------------ Elastic Beanstalk ---
+  Application:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !Ref ProjectName
+      Description: Elastic Beanstalk lab - Node.js application
+
+  Environment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      EnvironmentName: !Sub ${ProjectName}-env
+      SolutionStackName: !Ref SolutionStackName
+      Tier:
+        Name: WebServer
+        Type: Standard
+      OptionSettings:
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: IamInstanceProfile
+          Value: !Ref InstanceProfile
+        - Namespace: aws:autoscaling:launchconfiguration
+          OptionName: InstanceType
+          Value: !Ref InstanceType
+        - Namespace: aws:autoscaling:asg
+          OptionName: MinSize
+          Value: "1"
+        - Namespace: aws:autoscaling:asg
+          OptionName: MaxSize
+          Value: "2"
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: ServiceRole
+          Value: !Ref ServiceRole
+        - Namespace: aws:elasticbeanstalk:environment
+          OptionName: EnvironmentType
+          Value: SingleInstance
+        - Namespace: aws:elasticbeanstalk:healthreporting:system
+          OptionName: SystemType
+          Value: enhanced
+        # Managed environment variables (external service connection details)
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: TABLE_NAME
+          Value: !Ref VisitsTable
+        - Namespace: aws:elasticbeanstalk:application:environment
+          OptionName: AWS_REGION
+          Value: !Ref AWS::Region
+
+Outputs:
+  EnvironmentUrl:
+    Description: Public Elastic Beanstalk endpoint
+    Value: !Sub http://${Environment.EndpointURL}
+
+  ApplicationName:
+    Description: Elastic Beanstalk application name (used by CI/CD)
+    Value: !Ref Application
+
+  EnvironmentName:
+    Description: Elastic Beanstalk environment name (used by CI/CD)
+    Value: !Sub ${ProjectName}-env
+
+  SourceBundleBucketName:
+    Description: S3 bucket for application source bundles (used by CI/CD)
+    Value: !Ref SourceBundleBucket
+
+  GitHubDeployRoleArn:
+    Description: IAM role GitHub Actions assumes via OIDC
+    Value: !GetAtt GitHubDeployRole.Arn
+
+  VisitsTableName:
+    Description: DynamoDB table backing the visit counter
+    Value: !Ref VisitsTable

@@ -1,0 +1,94 @@
+name: Deploy to Elastic Beanstalk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "elastic-beanstalk/app/**"
+      - ".github/workflows/deploy-elastic-beanstalk.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+concurrency:
+  group: eb-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  EB_APPLICATION: eb-lab
+  EB_ENVIRONMENT: eb-lab-env
+  S3_BUCKET_PREFIX: eb-lab-bundles # full name: <prefix>-<account>-<region>
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: elastic-beanstalk/app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: elastic-beanstalk/app/package-lock.json
+
+      - name: Install production dependencies
+        run: npm ci --omit=dev || npm install --omit=dev
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package source bundle
+        run: |
+          VERSION_LABEL="${GITHUB_REF_NAME}-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}"
+          echo "VERSION_LABEL=${VERSION_LABEL}" >> "$GITHUB_ENV"
+          zip -r "../${VERSION_LABEL}.zip" . -x "*.git*"
+
+      - name: Upload bundle to S3
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="${S3_BUCKET_PREFIX}-${ACCOUNT_ID}-${AWS_REGION}"
+          echo "BUCKET=${BUCKET}" >> "$GITHUB_ENV"
+          aws s3 cp "../${VERSION_LABEL}.zip" "s3://${BUCKET}/${VERSION_LABEL}.zip"
+
+      - name: Create Elastic Beanstalk application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APPLICATION" \
+            --version-label "$VERSION_LABEL" \
+            --description "Commit ${GITHUB_SHA} by ${GITHUB_ACTOR}" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="${VERSION_LABEL}.zip" \
+            --process
+
+      - name: Deploy new version
+        run: |
+          aws elasticbeanstalk update-environment \
+            --environment-name "$EB_ENVIRONMENT" \
+            --version-label "$VERSION_LABEL"
+
+      - name: Wait for deployment to finish
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-names "$EB_ENVIRONMENT"
+          STATUS=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$EB_ENVIRONMENT" \
+            --query "Environments[0].[Status,Health,VersionLabel]" --output text)
+          echo "Environment status: ${STATUS}"
+
+      - name: Smoke test
+        run: |
+          URL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$EB_ENVIRONMENT" \
+            --query "Environments[0].CNAME" --output text)
+          echo "Testing http://${URL}/health"
+          curl --fail --retry 5 --retry-delay 10 "http://${URL}/health"

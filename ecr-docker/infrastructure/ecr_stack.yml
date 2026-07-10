@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECR lab - private container registry with image scanning, lifecycle
+  policy, and a least-privilege OIDC role for GitHub Actions to push images.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ecr-lab
+    Description: Prefix used for naming and tagging resources
+
+  RepositoryName:
+    Type: String
+    Default: ecr-lab-app
+    Description: Name of the private ECR repository
+
+  GitHubRepository:
+    Type: String
+    Default: gideondakore/cloudformation-iac
+    Description: GitHub org/repo allowed to assume the push role (OIDC)
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to push images
+
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to true only if the account does not yet have the GitHub Actions
+      OIDC provider (token.actions.githubusercontent.com). The eb-lab stack
+      in this repo may have created it already.
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+
+Resources:
+  # -------------------------------------------------------- ECR repository ---
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      # MUTABLE because the lab requires re-pushing the fixed tag
+      # <fullname>_<appname> on every push; a unique SHA tag is also pushed
+      # for traceability.
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 7 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only the 20 most recent tagged images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowPullWithinAccount
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+      Tags:
+        - Key: Name
+          Value: !Ref RepositoryName
+        - Key: project
+          Value: !Ref ProjectName
+
+  # ------------------------------------------ GitHub Actions OIDC (CI/CD) ---
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+  GitHubEcrPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-github-push-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:ref:refs/heads/${GitHubBranch}
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # GetAuthorizationToken is account-scoped and cannot be
+              # restricted to a single repository.
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: PushToLabRepositoryOnly
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt EcrRepository.Arn
+
+Outputs:
+  RepositoryUri:
+    Description: Push/pull URI of the private ECR repository
+    Value: !GetAtt EcrRepository.RepositoryUri
+
+  RepositoryConsoleUrl:
+    Description: Console link to the ECR repository (deliverable)
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/ecr/repositories/private/${AWS::AccountId}/${RepositoryName}
+
+  GitHubEcrPushRoleArn:
+    Description: IAM role GitHub Actions assumes via OIDC to push images
+    Value: !GetAtt GitHubEcrPushRole.Arn

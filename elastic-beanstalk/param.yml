@@ -1,0 +1,10 @@
+template-file-path: elastic-beanstalk/infrastructure/eb_stack.yml
+parameters:
+  ProjectName: eb-lab
+  InstanceType: t3.micro
+  GitHubRepository: gideondakore/cloudformation-iac
+  GitHubBranch: main
+  CreateGitHubOidcProvider: "true"
+tags:
+  project: eb-lab
+  managed-by: cloudformation-gitsync

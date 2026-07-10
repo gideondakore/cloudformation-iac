@@ -1,0 +1,10 @@
+template-file-path: ecr-docker/infrastructure/ecr_stack.yml
+parameters:
+  ProjectName: ecr-lab
+  RepositoryName: ecr-lab-app
+  GitHubRepository: gideondakore/cloudformation-iac
+  GitHubBranch: main
+  CreateGitHubOidcProvider: "false"
+tags:
+  project: ecr-lab
+  managed-by: cloudformation-gitsync

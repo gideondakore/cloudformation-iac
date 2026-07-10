@@ -1,0 +1,8 @@
+template-file-path: auto-scaling/autoscaling_lab.yml
+parameters:
+  ProjectName: autoscaling-lab
+  InstanceType: t3.micro
+  CpuTargetValue: 30
+tags:
+  project: autoscaling-lab
+  managed-by: cloudformation-gitsync

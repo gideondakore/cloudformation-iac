@@ -1,0 +1,9 @@
+template-file-path: ecs-cicd/infrastructure/ecs_stack.yml
+parameters:
+  ProjectName: ecs-lab
+  GitHubRepository: gideondakore/cloudformation-iac
+  GitHubBranch: main
+  CreateGitHubOidcProvider: "false"
+tags:
+  project: ecs-lab
+  managed-by: cloudformation-gitsync

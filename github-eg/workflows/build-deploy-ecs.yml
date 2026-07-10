@@ -1,0 +1,86 @@
+name: Build Java App and Push to ECR (ECS blue/green)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ecs-cicd/app/**"
+      - "github-eg/workflows/build-deploy-ecs.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+concurrency:
+  group: ecs-build
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: ecs-lab-app
+  ARTIFACT_BUCKET_PREFIX: ecs-lab-artifacts # full: <prefix>-<account>-<region>
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ecs-cicd/app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ECS_PUSH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image (immutable SHA tag)
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:sha-${GITHUB_SHA::12}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          docker build --tag "$IMAGE_URI" .
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name smoke -p 8080:8080 "$IMAGE_URI"
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8080/health; then break; fi
+            [ "$i" -eq 15 ] && { docker logs smoke; exit 1; }
+            sleep 2
+          done
+          curl -sf http://localhost:8080/ | grep -q "Gideon Dakore"
+          docker stop smoke
+
+      - name: Upload deploy bundle to S3
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="${ARTIFACT_BUCKET_PREFIX}-${ACCOUNT_ID}-${AWS_REGION}"
+
+          WORK=$(mktemp -d)
+          sed -e "s|<ACCOUNT_ID>|${ACCOUNT_ID}|g" -e "s|<REGION>|${AWS_REGION}|g" \
+            deploy/taskdef.json > "${WORK}/taskdef.json"
+          cp deploy/appspec.yaml "${WORK}/appspec.yaml"
+          printf '{"ImageURI":"%s"}' "$IMAGE_URI" > "${WORK}/imageDetail.json"
+
+          (cd "$WORK" && zip -q deploy-bundle.zip taskdef.json appspec.yaml imageDetail.json)
+          aws s3 cp "${WORK}/deploy-bundle.zip" "s3://${BUCKET}/deploy/deploy-bundle.zip"
+
+      # Push LAST: the ECR push event is what triggers the pipeline, so the
+      # deploy bundle (with the matching imageDetail.json) must exist first.
+      - name: Push image to ECR
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE_URI"
+          echo "Pushed ${IMAGE_URI} - EventBridge will start the blue/green pipeline" >> "$GITHUB_STEP_SUMMARY"

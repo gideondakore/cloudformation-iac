@@ -1,0 +1,12 @@
+{
+  "name": "ecr-lab-app",
+  "version": "1.0.0",
+  "description": "ECR lab - containerized Node.js app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
